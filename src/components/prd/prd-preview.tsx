@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -16,8 +17,16 @@ import {
   Check,
   Mail,
   Loader2,
+  Send,
+  Sparkles,
 } from "lucide-react";
 import type { FormData } from "@/lib/prd-types";
+import { BUDGET_OPTIONS } from "@/lib/prd-types";
+
+function getBudgetLabel(value: string): string {
+  const opt = BUDGET_OPTIONS.find((o) => o.value === value);
+  return opt ? opt.label : value;
+}
 
 interface PRDPreviewProps {
   content: string;
@@ -28,7 +37,7 @@ interface PRDPreviewProps {
   onReset: () => void;
 }
 
-type EmailStatus = "idle" | "sending" | "sent" | "no-smtp" | "error";
+type EmailStatus = "idle" | "sending" | "sent" | "error";
 
 export function PRDPreview({
   content,
@@ -39,14 +48,47 @@ export function PRDPreview({
   onReset,
 }: PRDPreviewProps) {
   const [copied, setCopied] = useState(false);
+  const [briefCopied, setBriefCopied] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
   const [emailStatus, setEmailStatus] = useState<EmailStatus>("idle");
-  const hasAttemptedEmail = useState(false);
+  const hasAutoSent = useRef(false);
 
-  const submitToPrcuisa = async (docContent: string) => {
+  // Post-process markdown: fix common AI formatting issues
+  const cleanContent = useMemo(() => {
+    if (!content) return "";
+    let text = content;
+
+    // Fix tables: ensure proper spacing around pipes
+    text = text.replace(/ *\| */g, " | ");
+    // Fix table separators: ensure at least 3 dashes
+    text = text.replace(/\|(\s*-{1,2}\s*)\|/g, "| --- |");
+    // Fix multiple blank lines to max 2
+    text = text.replace(/\n{4,}/g, "\n\n\n");
+    // Fix horizontal rules that are too sparse
+    text = text.replace(/^(-{3,})$/gm, "---");
+    // Remove trailing spaces on lines
+    text = text.replace(/ +\n/g, "\n");
+    // Fix missing newline before table
+    text = text.replace(/([^\n])\n(\|)/g, "$1\n\n$2");
+    // Fix missing newline after table
+    text = text.replace(/(\|[^\n]+)\n([^\n|])/g, "$1\n\n$2");
+
+    return text;
+  }, [content]);
+
+  // Extract Quick Brief code block
+  const quickBrief = useMemo(() => {
+    if (!content) return "";
+    const match = content.match(/```[\s\S]*?```/);
+    if (!match) return "";
+    return match[0].replace(/```\w*\n?/g, "").trim();
+  }, [content]);
+
+  const submitToFormspree = async (docContent: string) => {
     setEmailStatus("sending");
     try {
-      const response = await fetch("/api/submit-business", {
+      // Use backend route to avoid Formspree spam filter
+      const res = await fetch("/api/submit-business", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -54,13 +96,9 @@ export function PRDPreview({
           documentContent: docContent,
         }),
       });
-
-      const result = await response.json();
-
-      if (result.success && result.emailSent) {
+      const result = await res.json();
+      if (result.emailSent) {
         setEmailStatus("sent");
-      } else if (result.success && !result.emailSent) {
-        setEmailStatus("no-smtp");
       } else {
         setEmailStatus("error");
       }
@@ -69,14 +107,13 @@ export function PRDPreview({
     }
   };
 
-  // After streaming completes, auto-submit email
+  // After streaming completes, auto-submit
   useEffect(() => {
-    if (content && !isStreaming && hasAttemptedEmail[0] === false) {
-      hasAttemptedEmail[1](true);
+    if (content && !isStreaming && !hasAutoSent.current) {
+      hasAutoSent.current = true;
       const timer = setTimeout(() => setShowSuccess(true), 500);
-      // Auto-send email after a short delay
       const emailTimer = setTimeout(() => {
-        submitToPrcuisa(content);
+        submitToFormspree(content);
       }, 1500);
       return () => {
         clearTimeout(timer);
@@ -91,42 +128,56 @@ export function PRDPreview({
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      const textArea = document.createElement("textarea");
-      textArea.value = content;
-      document.body.appendChild(textArea);
-      textArea.select();
+      const ta = document.createElement("textarea");
+      ta.value = content;
+      document.body.appendChild(ta);
+      ta.select();
       document.execCommand("copy");
-      document.body.removeChild(textArea);
+      document.body.removeChild(ta);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
   };
 
-  const handleDownload = (format: "md" | "txt") => {
-    let fileContent: string;
-    let mimeType: string;
-    let extension: string;
-
-    if (format === "md") {
-      fileContent = content;
-      mimeType = "text/markdown";
-      extension = "md";
-    } else {
-      fileContent = content;
-      mimeType = "text/plain";
-      extension = "txt";
+  const handleCopyBrief = async () => {
+    if (!quickBrief) return;
+    try {
+      await navigator.clipboard.writeText(quickBrief);
+      setBriefCopied(true);
+      setTimeout(() => setBriefCopied(false), 2000);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = quickBrief;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      setBriefCopied(true);
+      setTimeout(() => setBriefCopied(false), 2000);
     }
+  };
 
-    const blob = new Blob([fileContent], { type: mimeType });
+  const handleDownload = (format: "md" | "txt") => {
+    const blob = new Blob([content], {
+      type: format === "md" ? "text/markdown" : "text/plain",
+    });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    const safeName = (businessName || "Kebutuhan_Bisnis").replace(/[^a-zA-Z0-9\s]/g, "").replace(/\s+/g, "_");
-    link.download = `Kebutuhan_Bisnis_${safeName}.${extension}`;
+    const safeName = (businessName || "Kebutuhan_Bisnis")
+      .replace(/[^a-zA-Z0-9\s]/g, "")
+      .replace(/\s+/g, "_");
+    link.download = `Kebutuhan_Bisnis_${safeName}.${format}`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+  };
+
+  const handleResend = () => {
+    setEmailStatus("idle");
+    hasAutoSent.current = false;
+    setTimeout(() => submitToFormspree(content), 100);
   };
 
   const isComplete = !!content && !isStreaming;
@@ -141,16 +192,17 @@ export function PRDPreview({
           </div>
           <div className="flex-1">
             <h3 className="font-semibold text-[#00464d]">
-              Dokumen Kebutuhan Bisnis Berhasil Dibuat! 🎉
+              Dokumen Kebutuhan Bisnis Berhasil Dibuat!
             </h3>
             <p className="text-sm text-[#00656d]">
-              Dokumen Anda sudah siap. Anda bisa menyalin atau mengunduhnya.
+              Dokumen sudah siap. Salin Quick Brief untuk langsung paste ke AI,
+              atau unduh file lengkapnya.
             </p>
           </div>
         </div>
       )}
 
-      {/* Email Status Banner */}
+      {/* Email Status Banners */}
       {emailStatus === "sending" && (
         <div className="bg-[#e0f2fe] border border-[#bae6fd] rounded-2xl p-4 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-2 duration-500">
           <Loader2 className="w-5 h-5 text-[#0ea5e9] animate-spin" />
@@ -170,48 +222,53 @@ export function PRDPreview({
           <div className="flex items-center justify-center w-10 h-10 rounded-full bg-[#c0ebf0]">
             <Mail className="w-5 h-5 text-[#009AA5]" />
           </div>
-          <div>
+          <div className="flex-1">
             <p className="text-sm font-medium text-[#00464d]">
-              Kebutuhan bisnis Anda berhasil dikirim ke tim Prcuisa!
+              Kebutuhan bisnis berhasil dikirim ke tim Prcuisa!
             </p>
             <p className="text-xs text-[#00656d]">
               Kami akan segera menghubungi Anda.
             </p>
           </div>
-        </div>
-      )}
-
-      {emailStatus === "no-smtp" && (
-        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3 animate-in fade-in slide-in-from-bottom-2 duration-500">
-          <Mail className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" />
-          <div>
-            <p className="text-sm font-medium text-amber-800">
-              Email otomatis belum aktif
-            </p>
-            <p className="text-xs text-amber-700 mt-1">
-              Dokumen sudah berhasil dibuat. Silakan unduh file (.md / .txt) lalu kirim manual ke{" "}
-              <a href="mailto:prcuisa@gmail.com" className="underline font-medium">prcuisa@gmail.com</a>.
-            </p>
-          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleResend}
+            className="gap-1.5 text-[#009AA5] hover:text-[#008a94] shrink-0"
+          >
+            <Send className="w-3.5 h-3.5" />
+            Kirim Ulang
+          </Button>
         </div>
       )}
 
       {emailStatus === "error" && (
         <div className="bg-red-50 border border-red-200 rounded-2xl p-4 flex items-start gap-3 animate-in fade-in slide-in-from-bottom-2 duration-500">
           <Mail className="w-5 h-5 text-red-500 mt-0.5 shrink-0" />
-          <div>
+          <div className="flex-1">
             <p className="text-sm font-medium text-red-800">
-              Gagal mengirim email otomatis
+              Gagal mengirim email
             </p>
             <p className="text-xs text-red-700 mt-1">
-              Dokumen tetap bisa diunduh. Silakan kirim manual ke{" "}
-              <a href="mailto:prcuisa@gmail.com" className="underline font-medium">prcuisa@gmail.com</a>.
+              Silakan kirim manual ke{" "}
+              <a href="mailto:prcuisa@gmail.com" className="underline font-medium">
+                prcuisa@gmail.com
+              </a>.
             </p>
           </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleResend}
+            className="gap-1.5 text-red-600 hover:text-red-700 shrink-0"
+          >
+            <Send className="w-3.5 h-3.5" />
+            Coba Lagi
+          </Button>
         </div>
       )}
 
-      {/* Header Actions */}
+      {/* Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-2xl font-bold text-foreground flex items-center gap-2 font-[family-name:var(--font-space-grotesk)]">
@@ -224,7 +281,6 @@ export function PRDPreview({
             </p>
           )}
         </div>
-
         <div className="flex items-center gap-2 flex-wrap">
           {isStreaming && (
             <Badge variant="secondary" className="gap-1.5 animate-pulse">
@@ -246,7 +302,27 @@ export function PRDPreview({
         <CardHeader className="border-b bg-muted/30">
           <div className="flex items-center justify-between">
             <CardTitle className="text-base">Preview Dokumen</CardTitle>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
+              {isComplete && quickBrief && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleCopyBrief}
+                  className="gap-1.5 text-[#009AA5] hover:text-[#008a94]"
+                >
+                  {briefCopied ? (
+                    <>
+                      <Check className="w-4 h-4" />
+                      <span className="hidden sm:inline">Brief Tersalin!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-4 h-4" />
+                      <span className="hidden sm:inline">Salin Brief</span>
+                    </>
+                  )}
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 size="sm"
@@ -272,9 +348,11 @@ export function PRDPreview({
         <CardContent className="p-0">
           <ScrollArea className="h-[65vh]">
             <div className="p-6 md:p-8 max-w-4xl mx-auto">
-              {content ? (
-                <div className="prose prose-sm md:prose-base max-w-none prose-headings:text-foreground prose-h1:text-2xl prose-h2:text-xl prose-h2:border-b prose-h2:border-[#c0ebf0] prose-h2:pb-2 prose-h2:mt-8 prose-h2:mb-4 prose-p:text-foreground/80 prose-li:text-foreground/80 prose-strong:text-foreground prose-ul:my-2 prose-ol:my-2 prose-table:text-sm prose-th:bg-muted prose-th:p-2 prose-td:p-2 prose-th:text-left prose-table:border prose-table:border-collapse">
-                  <ReactMarkdown>{content}</ReactMarkdown>
+              {cleanContent ? (
+                <div className="markdown-body">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {cleanContent}
+                  </ReactMarkdown>
                 </div>
               ) : (
                 <div className="flex items-center justify-center py-20 text-muted-foreground">
@@ -298,24 +376,15 @@ export function PRDPreview({
       {/* Action Buttons */}
       <div className="flex flex-col sm:flex-row gap-3 justify-between">
         <div className="flex gap-3">
-          <Button
-            variant="outline"
-            onClick={onBack}
-            className="gap-2"
-          >
+          <Button variant="outline" onClick={onBack} className="gap-2">
             <ArrowLeft className="w-4 h-4" />
             Kembali ke Formulir
           </Button>
-          <Button
-            variant="outline"
-            onClick={onReset}
-            className="gap-2"
-          >
+          <Button variant="outline" onClick={onReset} className="gap-2">
             <RotateCcw className="w-4 h-4" />
             Buat Baru
           </Button>
         </div>
-
         <div className="flex gap-3">
           <Button
             variant="outline"
@@ -324,7 +393,7 @@ export function PRDPreview({
             className="gap-2"
           >
             <Download className="w-4 h-4" />
-            Unduh Markdown (.md)
+            Unduh .md
           </Button>
           <Button
             onClick={() => handleDownload("txt")}
@@ -332,7 +401,7 @@ export function PRDPreview({
             className="gap-2 bg-gradient-to-r from-[#009AA5] to-[#0ea5e9] hover:from-[#008a94] hover:to-[#0284c7] text-white transition-all duration-300"
           >
             <Download className="w-4 h-4" />
-            Unduh Teks (.txt)
+            Unduh .txt
           </Button>
         </div>
       </div>

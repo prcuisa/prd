@@ -15,87 +15,111 @@ export async function POST(request: Request) {
       documentContent: string;
     };
 
-    const FORMSPREE_ID = process.env.FORMSPREE_FORM_ID;
+    const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+    const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-    if (!FORMSPREE_ID) {
-      console.warn("FORMSPREE_FORM_ID not configured. Submission skipped.");
+    if (!BOT_TOKEN || !CHAT_ID) {
+      console.warn("Telegram credentials not configured.");
       return NextResponse.json({
         success: true,
         emailSent: false,
-        message: "Formspree belum dikonfigurasi.",
+        message: "Telegram belum dikonfigurasi.",
       });
     }
 
-    const subject = `[Kebutuhan Bisnis Baru] dari ${formData.businessName || "Unknown"} - ${formData.industry || "Lainnya"}`;
+    const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+    const safeName =
+      (formData.businessName || "Bisnis")
+        .replace(/[^a-zA-Z0-9\s]/g, "")
+        .replace(/\s+/g, "_") || "Bisnis";
 
-    // Build JSON payload for Formspree
-    const payload: Record<string, string> = {
-      _subject: subject,
-      _replyto: formData.contactEmail || "",
-      "Nama Kontak / PIC": formData.contactName || "-",
-      Email: formData.contactEmail || "-",
-      "Nama Bisnis / Perusahaan": formData.businessName || "-",
-      "Jenis Industri": formData.industry || "-",
-      "Deskripsi Singkat": formData.businessDescription || "-",
-      "Masalah Utama": formData.mainProblem || "-",
-      "Solusi Saat Ini": formData.currentSolution || "-",
-      "Dampak Bisnis": formData.businessImpact || "-",
-      "Target Pengguna": formData.targetUsers || "-",
-      "Estimasi Jumlah Pengguna": formData.estimatedUsers || "-",
-      "Familiaritas Teknologi": formData.techFamiliarity || "-",
-      Perangkat: formData.devices?.join(", ") || "-",
-      "Fitur Utama":
-        formData.features
-          .filter((f) => f.name)
-          .map((f) => `${f.name}: ${f.description}`)
-          .join("\n") || "-",
-      "Fitur Prioritas": formData.priorityFeatures || "-",
-      "Fitur Khusus": formData.specialFeatures || "-",
-      Integrasi: formData.integrations || "-",
-      "Tujuan Utama": formData.mainGoal || "-",
-      "Target Timeline": formData.targetTimeline || "-",
-      "Estimasi Budget": getBudgetLabel(formData.budget) || "-",
-      KPI: formData.kpi || "-",
-      Deadline: formData.deadline || "-",
-      "Dokumen (Markdown)": documentContent || "-",
-    };
+    // ── 1. Send text message with form summary ──
+    const summary = [
+      `<b>🚀 Kebutuhan Bisnis Baru</b>`,
+      `<i>Diterima dari formulir Prcuisa.com</i>`,
+      ``,
+      `<b>═══ INFORMASI KONTAK ═══</b>`,
+      `👤 Nama: ${formData.contactName || "-"}`,
+      `📧 Email: ${formData.contactEmail || "-"}`,
+      ``,
+      `<b>═══ INFORMASI BISNIS ═══</b>`,
+      `🏢 Bisnis: ${formData.businessName || "-"}`,
+      `🏭 Industri: ${formData.industry || "-"}`,
+      `📝 Deskripsi: ${formData.businessDescription || "-"}`,
+      ``,
+      `<b>═══ MASALAH & TARGET ═══</b>`,
+      `❓ Masalah: ${formData.mainProblem || "-"}`,
+      `💡 Solusi Saat Ini: ${formData.currentSolution || "-"}`,
+      `📊 Dampak: ${formData.businessImpact || "-"}`,
+      `🎯 Target User: ${formData.targetUsers || "-"}`,
+      `👥 Jumlah User: ${formData.estimatedUsers || "-"}`,
+      `📱 Perangkat: ${formData.devices?.join(", ") || "-"}`,
+      ``,
+      `<b>═══ FITUR ═══</b>`,
+      ...formData.features
+        .filter((f) => f.name)
+        .map((f) => `  ▫️ ${f.name}: ${f.description}`),
+      `📌 Prioritas: ${formData.priorityFeatures || "-"}`,
+      `✨ Fitur Khusus: ${formData.specialFeatures || "-"}`,
+      `🔗 Integrasi: ${formData.integrations || "-"}`,
+      ``,
+      `<b>═══ TARGET & BUDGET ═══</b>`,
+      `🎯 Tujuan: ${formData.mainGoal || "-"}`,
+      `📅 Timeline: ${formData.targetTimeline || "-"}`,
+      `💰 Budget: ${getBudgetLabel(formData.budget) || "-"}`,
+      `📈 KPI: ${formData.kpi || "-"}`,
+      `⏰ Deadline: ${formData.deadline || "-"}`,
+    ].join("\n");
 
-    // Submit to Formspree as JSON
-    const formspreeRes = await fetch(
-      `https://formspree.io/f/${FORMSPREE_ID}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify(payload),
-      }
-    );
+    await fetch(`${TG_API}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: CHAT_ID,
+        text: summary,
+        parse_mode: "HTML",
+        disable_web_page_preview: true,
+      }),
+    });
 
-    if (formspreeRes.ok) {
-      console.log("Formspree submission successful");
-      return NextResponse.json({
-        success: true,
-        emailSent: true,
-        message: "Kebutuhan bisnis berhasil dikirim ke tim Prcuisa.",
-      });
-    } else {
-      const errText = await formspreeRes.text();
-      console.error("Formspree error:", formspreeRes.status, errText);
-      return NextResponse.json({
-        success: true,
-        emailSent: false,
-        message: "Dokumen berhasil dibuat, namun gagal dikirim via Formspree.",
-      });
-    }
+    // ── 2. Send .md file as Telegram document ──
+    const mdBuffer = Buffer.from(documentContent, "utf-8");
+    const mdForm = new FormData();
+    mdForm.append("chat_id", CHAT_ID);
+    mdForm.append("document", new Blob([mdBuffer], { type: "text/markdown" }), `Kebutuhan_Bisnis_${safeName}.md`);
+    mdForm.append("caption", `📄 Dokumen lengkap: ${formData.businessName || "Bisnis"} - ${formData.industry || "-"}`);
+
+    await fetch(`${TG_API}/sendDocument`, {
+      method: "POST",
+      body: mdForm,
+    });
+
+    // ── 3. Send .txt file as Telegram document ──
+    const txtBuffer = Buffer.from(documentContent, "utf-8");
+    const txtForm = new FormData();
+    txtForm.append("chat_id", CHAT_ID);
+    txtForm.append("document", new Blob([txtBuffer], { type: "text/plain" }), `Kebutuhan_Bisnis_${safeName}.txt`);
+    txtForm.append("caption", `📝 Versi teks: ${formData.businessName || "Bisnis"} - ${formData.industry || "-"}`);
+
+    await fetch(`${TG_API}/sendDocument`, {
+      method: "POST",
+      body: txtForm,
+    });
+
+    console.log("Telegram: Message + 2 files sent successfully");
+
+    return NextResponse.json({
+      success: true,
+      emailSent: true,
+      message: "Kebutuhan bisnis berhasil dikirim ke tim Prcuisa via Telegram!",
+    });
   } catch (error) {
     console.error("Error in submit-business:", error);
     return NextResponse.json(
       {
         success: false,
         emailSent: false,
-        message: "Terjadi kesalahan saat mengirim data.",
+        message: "Gagal mengirim data.",
       },
       { status: 500 }
     );
